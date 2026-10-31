@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.exe
+*.lnk
+icon.ico
+app.py
+build/
+dist/
+*.spec
+.idea/
+.vscode/
