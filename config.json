@@ -1,0 +1,28 @@
+{
+    "window": {
+        "width": 420,
+        "height": 530
+    },
+    "music_apps": [
+        "spotify.exe",
+        "firefox.exe",
+        "chrome.exe",
+        "msedge.exe",
+        "opera.exe",
+        "brave.exe",
+        "yandexmusic.exe",
+        "browser.exe",
+        "vlc.exe"
+    ],
+    "game_apps": [
+        "millidaminecraft.exe",
+        "minecraft.exe",
+        "javaw.exe",
+        "java.exe"
+    ],
+    "discord_apps": [
+        "discord.exe",
+        "discordcanary.exe",
+        "discordptb.exe"
+    ]
+}

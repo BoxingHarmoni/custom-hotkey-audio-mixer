@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import threading
 import ctypes
 from ctypes import wintypes
@@ -30,6 +31,44 @@ class RECT(ctypes.Structure):
         ('bottom', wintypes.LONG)
     ]
 
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+DEFAULT_CONFIG = {
+    "window": {
+        "width": 420,
+        "height": 530
+    },
+    "music_apps": [
+        "spotify.exe", "firefox.exe", "chrome.exe", "msedge.exe",
+        "opera.exe", "brave.exe", "yandexmusic.exe", "browser.exe", "vlc.exe"
+    ],
+    "game_apps": [
+        "millidaminecraft.exe", "minecraft.exe", "javaw.exe", "java.exe"
+    ],
+    "discord_apps": [
+        "discord.exe", "discordcanary.exe", "discordptb.exe"
+    ]
+}
+
+def load_config():
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                cfg = DEFAULT_CONFIG.copy()
+                cfg.update(data)
+                return cfg
+        except Exception:
+            pass
+    return DEFAULT_CONFIG.copy()
+
+def save_config(cfg):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=4, ensure_ascii=False)
+    except Exception:
+        pass
+
 FRIENDLY_NAMES = {
     "millidaminecraft.exe": "Minecraft",
     "minecraft.exe": "Minecraft",
@@ -41,6 +80,8 @@ FRIENDLY_NAMES = {
     "opera.exe": "Opera",
     "brave.exe": "Brave",
     "discord.exe": "Discord",
+    "discordcanary.exe": "Discord Canary",
+    "discordptb.exe": "Discord PTB",
     "spotify.exe": "Spotify",
     "telegram.exe": "Telegram",
     "steam.exe": "Steam",
@@ -93,7 +134,6 @@ def set_autostart(enable=True):
     if enable:
         if not os.path.exists(lnk):
             try:
-                # Copy from app folder
                 src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "AltMixer.lnk")
                 if os.path.exists(src):
                     import shutil
@@ -112,6 +152,7 @@ class QuickMixerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
+        self.cfg = load_config()
         self.title("AltMixer")
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -125,18 +166,34 @@ class QuickMixerApp(ctk.CTk):
         self.wm_attributes("-transparentcolor", TRANS_COLOR)
         self.configure(fg_color=TRANS_COLOR)
 
-        self.width = 410
-        self.height = 510
+        win_cfg = self.cfg.get("window", {})
+        self.width = max(320, min(700, win_cfg.get("width", 420)))
+        self.height = max(380, min(850, win_cfg.get("height", 530)))
         self.is_visible = False
         self.is_updating_ui = False
+
+        # Ducking memory
+        self.music_duck_active = False
+        self.saved_music_volumes = {}
+
+        # Cache of current app rows for quick keyboard actions
+        self.current_app_list = []
+
+        # Drag resize state
+        self.drag_start_x = 0
+        self.drag_start_y = 0
+        self.orig_w = self.width
+        self.orig_h = self.height
 
         # Build UI layout
         self.setup_ui()
 
         # Keyboard shortcuts inside window
         self.bind("<Escape>", lambda e: self.hide_window())
+        for num in range(1, 10):
+            self.bind(str(num), lambda e, idx=num-1: self.toggle_app_by_index(idx))
 
-        # Low-level keyboard hook
+        # Global low-level keyboard hook
         self.start_keyboard_hook()
 
         # Tray icon
@@ -175,28 +232,68 @@ class QuickMixerApp(ctk.CTk):
 
         # Header Frame
         header = ctk.CTkFrame(self.card, fg_color="transparent")
-        header.pack(fill="x", padx=16, pady=(14, 6))
+        header.pack(fill="x", padx=14, pady=(12, 6))
+
+        # Top-left resize grip
+        self.resize_grip = ctk.CTkLabel(
+            header,
+            text="⤡",
+            font=ctk.CTkFont(size=14),
+            text_color="#71717a",
+            cursor="size_nw_se"
+        )
+        self.resize_grip.pack(side="left", padx=(0, 6))
+        self.resize_grip.bind("<Button-1>", self.start_drag_resize)
+        self.resize_grip.bind("<B1-Motion>", self.do_drag_resize)
+        self.resize_grip.bind("<ButtonRelease-1>", self.end_drag_resize)
 
         title_lbl = ctk.CTkLabel(
             header,
             text="🔊  Микшер звука",
-            font=ctk.CTkFont(size=16, weight="bold"),
+            font=ctk.CTkFont(size=15, weight="bold"),
             text_color="#f4f4f5"
         )
         title_lbl.pack(side="left")
 
+        # Header action buttons: Close, Zoom in, Zoom out
         close_btn = ctk.CTkButton(
             header,
             text="✕",
-            width=28,
-            height=28,
-            corner_radius=14,
+            width=26,
+            height=26,
+            corner_radius=13,
             fg_color="#242430",
             hover_color="#ef4444",
-            font=ctk.CTkFont(size=13, weight="bold"),
+            font=ctk.CTkFont(size=12, weight="bold"),
             command=self.hide_window
         )
-        close_btn.pack(side="right")
+        close_btn.pack(side="right", padx=(4, 0))
+
+        plus_btn = ctk.CTkButton(
+            header,
+            text="➕",
+            width=26,
+            height=26,
+            corner_radius=13,
+            fg_color="#242430",
+            hover_color="#3b82f6",
+            font=ctk.CTkFont(size=11),
+            command=lambda: self.change_window_size(35, 45)
+        )
+        plus_btn.pack(side="right", padx=(4, 0))
+
+        minus_btn = ctk.CTkButton(
+            header,
+            text="➖",
+            width=26,
+            height=26,
+            corner_radius=13,
+            fg_color="#242430",
+            hover_color="#3b82f6",
+            font=ctk.CTkFont(size=11),
+            command=lambda: self.change_window_size(-35, -45)
+        )
+        minus_btn.pack(side="right")
 
         # Master Volume Card
         self.master_frame = ctk.CTkFrame(
@@ -206,10 +303,10 @@ class QuickMixerApp(ctk.CTk):
             border_width=1,
             border_color="#323242"
         )
-        self.master_frame.pack(fill="x", padx=14, pady=6)
+        self.master_frame.pack(fill="x", padx=12, pady=5)
 
         m_top = ctk.CTkFrame(self.master_frame, fg_color="transparent")
-        m_top.pack(fill="x", padx=12, pady=(8, 2))
+        m_top.pack(fill="x", padx=12, pady=(7, 2))
 
         m_title = ctk.CTkLabel(
             m_top,
@@ -228,13 +325,13 @@ class QuickMixerApp(ctk.CTk):
         self.master_pct_lbl.pack(side="right")
 
         m_bot = ctk.CTkFrame(self.master_frame, fg_color="transparent")
-        m_bot.pack(fill="x", padx=10, pady=(2, 8))
+        m_bot.pack(fill="x", padx=10, pady=(2, 7))
 
         self.master_mute_btn = ctk.CTkButton(
             m_bot,
             text="🔊",
             width=36,
-            height=32,
+            height=30,
             corner_radius=8,
             fg_color="#2d2d3c",
             hover_color="#3b82f6",
@@ -258,7 +355,7 @@ class QuickMixerApp(ctk.CTk):
 
         # Apps Section Title
         apps_title_frame = ctk.CTkFrame(self.card, fg_color="transparent")
-        apps_title_frame.pack(fill="x", padx=16, pady=(10, 4))
+        apps_title_frame.pack(fill="x", padx=14, pady=(8, 2))
 
         apps_lbl = ctk.CTkLabel(
             apps_title_frame,
@@ -274,34 +371,69 @@ class QuickMixerApp(ctk.CTk):
             fg_color="transparent",
             corner_radius=10
         )
-        self.scroll_frame.pack(fill="both", expand=True, padx=10, pady=4)
+        self.scroll_frame.pack(fill="both", expand=True, padx=8, pady=3)
 
-        # Footer hint
+        # Footer Quick-guide hint
         footer = ctk.CTkFrame(self.card, fg_color="transparent")
-        footer.pack(fill="x", padx=14, pady=(4, 10))
+        footer.pack(fill="x", padx=12, pady=(2, 8))
 
         hint_lbl = ctk.CTkLabel(
             footer,
-            text="[Правый Alt] или [F8] — открыть / скрыть | [Esc] — закрыть",
-            font=ctk.CTkFont(size=11),
+            text="[RAlt+M] Музыка Mute | [RAlt+[] Приглушить | [1..9] Mute строки | [Esc] Закрыть",
+            font=ctk.CTkFont(size=10),
             text_color="#71717a"
         )
         hint_lbl.pack(side="left")
 
-    def get_screen_position(self):
+    # --- Resizing & Geometry Handling ---
+    def get_screen_position(self, w, h):
         rect = RECT()
         user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0)
-        x = rect.right - self.width - 16
-        y = rect.bottom - self.height - 16
+        x = rect.right - w - 16
+        y = rect.bottom - h - 16
         return x, y
 
+    def change_window_size(self, dw, dh):
+        new_w = max(320, min(700, self.width + dw))
+        new_h = max(380, min(850, self.height + dh))
+        self.set_window_dimensions(new_w, new_h)
+        self.cfg["window"]["width"] = self.width
+        self.cfg["window"]["height"] = self.height
+        save_config(self.cfg)
+
+    def set_window_dimensions(self, w, h):
+        self.width = w
+        self.height = h
+        x, y = self.get_screen_position(w, h)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.apply_dwm_rounding()
+
+    def start_drag_resize(self, event):
+        self.drag_start_x = event.x_root
+        self.drag_start_y = event.y_root
+        self.orig_w = self.width
+        self.orig_h = self.height
+
+    def do_drag_resize(self, event):
+        dx = self.drag_start_x - event.x_root
+        dy = self.drag_start_y - event.y_root
+        new_w = max(320, min(700, self.orig_w + dx))
+        new_h = max(380, min(850, self.orig_h + dy))
+        self.set_window_dimensions(new_w, new_h)
+
+    def end_drag_resize(self, event):
+        self.cfg["window"]["width"] = self.width
+        self.cfg["window"]["height"] = self.height
+        save_config(self.cfg)
+
+    # --- Visibility Toggle ---
     def show_window(self):
         try:
             comtypes.CoInitialize()
             self.refresh_audio_sessions()
         except Exception:
             pass
-        x, y = self.get_screen_position()
+        x, y = self.get_screen_position(self.width, self.height)
         self.geometry(f"{self.width}x{self.height}+{x}+{y}")
         self.deiconify()
         self.lift()
@@ -412,6 +544,11 @@ class QuickMixerApp(ctk.CTk):
         except Exception:
             pass
 
+    def toggle_app_by_index(self, idx):
+        if 0 <= idx < len(self.current_app_list):
+            item = self.current_app_list[idx]
+            self.toggle_app_mute(item["pname"], item["sessions"], item["btn"])
+
     def refresh_audio_sessions(self):
         self.update_master_ui()
         try:
@@ -432,6 +569,8 @@ class QuickMixerApp(ctk.CTk):
             for widget in self.scroll_frame.winfo_children():
                 widget.destroy()
 
+            self.current_app_list = []
+
             if not grouped:
                 no_apps = ctk.CTkLabel(
                     self.scroll_frame,
@@ -443,6 +582,7 @@ class QuickMixerApp(ctk.CTk):
                 return
 
             self.is_updating_ui = True
+            row_idx = 1
             for pname_lower, data in grouped.items():
                 s_list = data["sessions"]
                 display_name = get_app_display(pname_lower)
@@ -464,14 +604,15 @@ class QuickMixerApp(ctk.CTk):
                     border_width=1,
                     border_color="#2e2e3e"
                 )
-                app_card.pack(fill="x", pady=4, padx=2)
+                app_card.pack(fill="x", pady=3, padx=2)
 
                 top_row = ctk.CTkFrame(app_card, fg_color="transparent")
-                top_row.pack(fill="x", padx=10, pady=(6, 2))
+                top_row.pack(fill="x", padx=10, pady=(5, 2))
 
+                hotkey_badge = f"[{row_idx}] " if row_idx <= 9 else ""
                 lbl_name = ctk.CTkLabel(
                     top_row,
-                    text=f"{icon}  {display_name}",
+                    text=f"{icon}  {hotkey_badge}{display_name}",
                     font=ctk.CTkFont(size=12, weight="bold"),
                     text_color="#e4e4e7"
                 )
@@ -519,23 +660,115 @@ class QuickMixerApp(ctk.CTk):
                 app_card.bind("<MouseWheel>", lambda e, s=slider, pn=pname_lower, sl=s_list, pl=pct_lbl, mb=mute_btn: 
                     self.on_slider_wheel(s, e, lambda v: self.on_app_slider_change(v, pn, sl, pl, mb)))
 
+                self.current_app_list.append({
+                    "pname": pname_lower,
+                    "sessions": s_list,
+                    "btn": mute_btn,
+                    "slider": slider,
+                    "lbl": pct_lbl
+                })
+                row_idx += 1
+
             self.is_updating_ui = False
         except Exception:
             pass
 
-    # --- Global Keyboard Hook via keyboard library ---
+    # --- Quick Group Actions (Music / Discord / Game) ---
+    def _get_group_sessions(self, app_targets):
+        comtypes.CoInitialize()
+        sessions = AudioUtilities.GetAllSessions()
+        matched = []
+        for s in sessions:
+            if s.Process:
+                try:
+                    pname = s.Process.name().lower()
+                    if any(t in pname for t in app_targets):
+                        matched.append(s)
+                except Exception:
+                    pass
+        return matched
+
+    def toggle_group_mute(self, app_targets):
+        try:
+            sessions = self._get_group_sessions(app_targets)
+            if not sessions:
+                return
+            is_any_unmuted = any(not s.SimpleAudioVolume.GetMute() for s in sessions)
+            new_mute = is_any_unmuted
+            for s in sessions:
+                try:
+                    s.SimpleAudioVolume.SetMute(new_mute, None)
+                except Exception:
+                    pass
+            if self.is_visible:
+                self.after(0, self.refresh_audio_sessions)
+        except Exception:
+            pass
+
+    def adjust_group_volume(self, app_targets, delta):
+        try:
+            sessions = self._get_group_sessions(app_targets)
+            if not sessions:
+                return
+            for s in sessions:
+                try:
+                    cur = s.SimpleAudioVolume.GetMasterVolume()
+                    new_vol = max(0.0, min(1.0, cur + delta))
+                    s.SimpleAudioVolume.SetMasterVolume(new_vol, None)
+                    if new_vol > 0 and s.SimpleAudioVolume.GetMute():
+                        s.SimpleAudioVolume.SetMute(0, None)
+                except Exception:
+                    pass
+            if self.is_visible:
+                self.after(0, self.refresh_audio_sessions)
+        except Exception:
+            pass
+
+    def toggle_music_duck(self):
+        music_apps = self.cfg.get("music_apps", [])
+        try:
+            sessions = self._get_group_sessions(music_apps)
+            if not sessions:
+                return
+
+            if not self.music_duck_active:
+                # Duck: save current volume and set to 12%
+                self.saved_music_volumes.clear()
+                for s in sessions:
+                    try:
+                        pname = s.Process.name().lower()
+                        self.saved_music_volumes[pname] = s.SimpleAudioVolume.GetMasterVolume()
+                        s.SimpleAudioVolume.SetMasterVolume(0.12, None)
+                    except Exception:
+                        pass
+                self.music_duck_active = True
+            else:
+                # Restore original volumes
+                for s in sessions:
+                    try:
+                        pname = s.Process.name().lower()
+                        orig = self.saved_music_volumes.get(pname, 0.75)
+                        s.SimpleAudioVolume.SetMasterVolume(orig, None)
+                    except Exception:
+                        pass
+                self.music_duck_active = False
+
+            if self.is_visible:
+                self.after(0, self.refresh_audio_sessions)
+        except Exception:
+            pass
+
+    # --- Global Keyboard Hook ---
     def start_keyboard_hook(self):
         is_ralt_down = [False]
         combo_detected = [False]
 
         def is_right_alt_event(name, scan_code):
             name = (name or "").lower().strip()
-            # Strictly exclude Left Alt
             if name in ("left alt", "left menu") or "left" in name:
                 return False
             if name == "alt" and scan_code == 56:
                 return False
-            # Check for Right Alt or AltGr
             if name in ("right alt", "alt gr", "right menu"):
                 return True
             if scan_code in (57400, 0xE038, 541, 0x138):
@@ -548,6 +781,10 @@ class QuickMixerApp(ctk.CTk):
             name = (e.name or "").lower()
             is_trigger = is_right_alt_event(name, e.scan_code)
 
+            music_apps = self.cfg.get("music_apps", [])
+            game_apps = self.cfg.get("game_apps", [])
+            discord_apps = self.cfg.get("discord_apps", [])
+
             if e.event_type == "down":
                 if is_trigger:
                     if not is_ralt_down[0]:
@@ -558,6 +795,29 @@ class QuickMixerApp(ctk.CTk):
                 else:
                     if is_ralt_down[0] and name not in ("ctrl", "left ctrl", "right ctrl"):
                         combo_detected[0] = True
+                        # Trigger rich gaming shortcuts
+                        if name == "m":
+                            self.toggle_group_mute(music_apps)
+                        elif name == "down":
+                            self.adjust_group_volume(music_apps, -0.10)
+                        elif name == "up":
+                            self.adjust_group_volume(music_apps, +0.10)
+                        elif name in ("[", "{", "х"):  # Clutch / Duck music
+                            self.toggle_music_duck()
+                        elif name == "g":
+                            self.toggle_group_mute(game_apps)
+                        elif name == "page down":
+                            self.adjust_group_volume(game_apps, -0.10)
+                        elif name == "page up":
+                            self.adjust_group_volume(game_apps, +0.10)
+                        elif name == "d":
+                            self.toggle_group_mute(discord_apps)
+                        elif name in ("-", "_"):
+                            self.adjust_group_volume(discord_apps, -0.10)
+                        elif name in ("=", "+"):
+                            self.adjust_group_volume(discord_apps, +0.10)
+                        elif name == "backspace":
+                            self.toggle_master_mute()
 
             elif e.event_type == "up":
                 if is_trigger:
@@ -595,6 +855,7 @@ class QuickMixerApp(ctk.CTk):
     def _run_tray(self):
         menu = pystray.Menu(
             pystray.MenuItem("🔊 Открыть микшер", lambda icon, item: self.after(0, self.show_window), default=True),
+            pystray.MenuItem("🔇 Приглушить музыку (Clutch)", lambda icon, item: self.toggle_music_duck()),
             pystray.MenuItem("⚙️ Запуск с Windows", self.toggle_autostart_action, checked=lambda item: is_autostart_active()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("❌ Выход", self.quit_app)
