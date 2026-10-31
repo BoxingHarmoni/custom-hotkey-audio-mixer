@@ -528,9 +528,25 @@ class QuickMixerApp(ctk.CTk):
         is_ralt_down = [False]
         combo_detected = [False]
 
+        def is_right_alt_event(name, scan_code):
+            name = (name or "").lower().strip()
+            # Strictly exclude Left Alt
+            if name in ("left alt", "left menu") or "left" in name:
+                return False
+            if name == "alt" and scan_code == 56:
+                return False
+            # Check for Right Alt or AltGr
+            if name in ("right alt", "alt gr", "right menu"):
+                return True
+            if scan_code in (57400, 0xE038, 541, 0x138):
+                return True
+            if "right" in name and "alt" in name:
+                return True
+            return False
+
         def on_key(e):
             name = (e.name or "").lower()
-            is_trigger = name in ("right alt", "alt gr") or (e.scan_code in (0x38, 0x138) and "alt" in name)
+            is_trigger = is_right_alt_event(name, e.scan_code)
 
             if e.event_type == "down":
                 if is_trigger:
