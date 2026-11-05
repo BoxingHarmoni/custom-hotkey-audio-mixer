@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import time
 import threading
 import ctypes
 from ctypes import wintypes
@@ -762,70 +763,117 @@ class QuickMixerApp(ctk.CTk):
     def start_keyboard_hook(self):
         is_ralt_down = [False]
         combo_detected = [False]
+        ralt_press_time = [0.0]
+
+        def is_left_alt_pressed():
+            return bool(user32.GetAsyncKeyState(0xA4) & 0x8000)
+
+        def is_shift_pressed():
+            return bool(user32.GetAsyncKeyState(0x10) & 0x8000)
+
+        def is_tab_pressed():
+            return bool(user32.GetAsyncKeyState(0x09) & 0x8000)
+
+        def is_ctrl_pressed():
+            return bool(user32.GetAsyncKeyState(0x11) & 0x8000)
+
+        def is_win_pressed():
+            return bool((user32.GetAsyncKeyState(0x5B) | user32.GetAsyncKeyState(0x5C)) & 0x8000)
 
         def is_right_alt_event(name, scan_code):
-            name = (name or "").lower().strip()
-            if name in ("left alt", "left menu") or "left" in name:
+            # Physical Left Alt check via Windows API - strictly reject if Left Alt is held
+            if is_left_alt_pressed():
                 return False
-            if name == "alt" and scan_code == 56:
+            name = (name or '').lower().strip()
+            # Strictly exclude Left Alt by name
+            if 'left' in name or name in ('left alt', 'left menu'):
                 return False
-            if name in ("right alt", "alt gr", "right menu"):
+            if name == 'alt' and scan_code == 56:
+                return False
+            # Match Right Alt or AltGr
+            if name in ('right alt', 'alt gr', 'right menu'):
                 return True
             if scan_code in (57400, 0xE038, 541, 0x138):
                 return True
-            if "right" in name and "alt" in name:
+            if 'right' in name and 'alt' in name:
                 return True
             return False
 
         def on_key(e):
-            name = (e.name or "").lower()
+            name = (e.name or '').lower().strip()
+
+            # If Left Alt is involved in any way, immediately mark combo and reject
+            if is_left_alt_pressed() or 'left alt' in name or (name == 'alt' and e.scan_code == 56):
+                if is_ralt_down[0]:
+                    combo_detected[0] = True
+                return
+
             is_trigger = is_right_alt_event(name, e.scan_code)
 
-            music_apps = self.cfg.get("music_apps", [])
-            game_apps = self.cfg.get("game_apps", [])
-            discord_apps = self.cfg.get("discord_apps", [])
+            music_apps = self.cfg.get('music_apps', [])
+            game_apps = self.cfg.get('game_apps', [])
+            discord_apps = self.cfg.get('discord_apps', [])
 
-            if e.event_type == "down":
+            # Check if Shift / Tab / Win / Ctrl is currently pressed
+            modifiers_active = is_shift_pressed() or is_tab_pressed() or is_win_pressed() or (is_ctrl_pressed() and not is_trigger)
+
+            if e.event_type == 'down':
                 if is_trigger:
                     if not is_ralt_down[0]:
                         is_ralt_down[0] = True
-                        combo_detected[0] = False
-                elif name == "f8":
-                    self.after(0, self.toggle_window)
+                        ralt_press_time[0] = time.time()
+                        # If Shift, Tab, Win, etc. is ALREADY pressed when Right Alt is hit, mark as combo
+                        combo_detected[0] = modifiers_active
+                elif name == 'f8':
+                    # Pure F8: only trigger if no modifiers like Alt, Shift, Ctrl, Win are held
+                    if not (is_shift_pressed() or is_left_alt_pressed() or is_ctrl_pressed() or is_win_pressed()):
+                        self.after(0, self.toggle_window)
                 else:
-                    if is_ralt_down[0] and name not in ("ctrl", "left ctrl", "right ctrl"):
+                    if is_ralt_down[0]:
                         combo_detected[0] = True
                         # Trigger rich gaming shortcuts
-                        if name == "m":
+                        if name == 'm':
                             self.toggle_group_mute(music_apps)
-                        elif name == "down":
+                        elif name == 'down':
                             self.adjust_group_volume(music_apps, -0.10)
-                        elif name == "up":
+                        elif name == 'up':
                             self.adjust_group_volume(music_apps, +0.10)
-                        elif name in ("[", "{", "х"):  # Clutch / Duck music
+                        elif name in ('[', '{'):
                             self.toggle_music_duck()
-                        elif name == "g":
+                        elif name == 'g':
                             self.toggle_group_mute(game_apps)
-                        elif name == "page down":
+                        elif name == 'page down':
                             self.adjust_group_volume(game_apps, -0.10)
-                        elif name == "page up":
+                        elif name == 'page up':
                             self.adjust_group_volume(game_apps, +0.10)
-                        elif name == "d":
+                        elif name == 'd':
                             self.toggle_group_mute(discord_apps)
-                        elif name in ("-", "_"):
+                        elif name in ('-', '_'):
                             self.adjust_group_volume(discord_apps, -0.10)
-                        elif name in ("=", "+"):
+                        elif name in ('=', '+'):
                             self.adjust_group_volume(discord_apps, +0.10)
-                        elif name == "backspace":
+                        elif name == 'backspace':
                             self.toggle_master_mute()
 
-            elif e.event_type == "up":
+            elif e.event_type == 'up':
+                # If another key was released while Right Alt is held (e.g. Shift released during Alt+Shift)
+                if is_ralt_down[0] and not is_trigger:
+                    combo_detected[0] = True
+
                 if is_trigger:
+                    duration = time.time() - ralt_press_time[0]
                     is_ralt_down[0] = False
-                    if not combo_detected[0]:
+                    # Only trigger on clean standalone tap
+                    if (not combo_detected[0] and
+                        not is_shift_pressed() and
+                        not is_tab_pressed() and
+                        not is_win_pressed() and
+                        not is_left_alt_pressed() and
+                        duration < 0.6):
                         self.after(0, self.toggle_window)
 
         keyboard.hook(on_key)
+
 
     # --- System Tray Icon ---
     def start_tray(self):
